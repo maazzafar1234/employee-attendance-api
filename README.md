@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Employee Attendance & Analytics API
 
 A REST API built using **Python, FastAPI, and MongoDB Atlas** to manage employee attendance, punch-in and punch-out records, attendance regularization, and department analytics.
@@ -105,3 +106,6 @@ The API uses appropriate HTTP status codes for successful requests, validation f
 - Configure your own MongoDB connection string through environment variables.
 - Keep `.env` and `.venv/` out of version control.
 - Verify all assignment-specific business rules and concurrency requirements before submission.
+=======
+# employee-attendance-api
+>>>>>>> fc53ef8a3c9039a52b3905e006dd44153819ab66
