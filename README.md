@@ -30,12 +30,13 @@ employee-attendance-api/
 ├── app/
 │   ├── __init__.py
 │   └── main.py
-├── .env
 ├── .gitignore
 ├── requirements.txt
 ├── README.md
 ├── REVIEW.md
-└── DECISIONS.md
+├── DECISIONS.md
+├── test_concurrency.py
+└── test_regularization_concurrency.py
 ```
 
 ## Setup
@@ -62,31 +63,31 @@ Do not commit database credentials or other secrets to version control.
 ### 4. Start the API
 
 ```powershell
-python -m uvicorn app.main:app --port 8000
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 ### 5. Open the API documentation
 
 Visit:
 
-`http://127.0.0.1:8000/docs`
+http://127.0.0.1:8000/docs
 
 ## API Endpoints
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/health` | Health check |
-| POST | `/employees` | Create an employee |
-| GET | `/employees` | List employees |
-| POST | `/attendance/punch-in` | Record punch-in |
-| POST | `/attendance/punch-out` | Record punch-out |
-| GET | `/attendance` | List attendance records |
-| PATCH | `/attendance/{emp_code}/{date}` | Regularize attendance |
-| GET | `/analytics/employees/{emp_code}/monthly` | Monthly employee analytics |
-| GET | `/analytics/departments/summary` | Department summary |
-| GET | `/analytics/leaderboard/late` | Late-arrival leaderboard |
-| GET | `/analytics/departments/{department}/trend` | Department attendance trend |
-| GET | `/admin/explain/{endpoint}` | Inspect MongoDB query execution plans |
+| Method | Endpoint                                    | Purpose                               |
+| ------ | ------------------------------------------- | ------------------------------------- |
+| GET    | `/health`                                   | Health check                          |
+| POST   | `/employees`                                | Create an employee                    |
+| GET    | `/employees`                                | List employees                        |
+| POST   | `/attendance/punch-in`                      | Record punch-in                       |
+| POST   | `/attendance/punch-out`                     | Record punch-out                      |
+| GET    | `/attendance`                               | List attendance records               |
+| PATCH  | `/attendance/{emp_code}/{date}`             | Regularize attendance                 |
+| GET    | `/analytics/employees/{emp_code}/monthly`   | Monthly employee analytics            |
+| GET    | `/analytics/departments/summary`            | Department summary                    |
+| GET    | `/analytics/leaderboard/late`               | Late-arrival leaderboard              |
+| GET    | `/analytics/departments/{department}/trend` | Department attendance trend           |
+| GET    | `/admin/explain/{endpoint}`                 | Inspect MongoDB query execution plans |
 
 Use Swagger UI to review request parameters and schemas for each endpoint.
 
@@ -99,6 +100,17 @@ The explain endpoints expose MongoDB execution statistics to help inspect index 
 ## Error Handling
 
 The API uses appropriate HTTP status codes for successful requests, validation failures, missing resources, and conflicting attendance operations.
+
+## Testing
+
+Run the concurrency tests with the API running and the required MongoDB environment variables configured:
+
+```powershell
+python -m pip install pytest requests
+python -m pytest -v test_concurrency.py test_regularization_concurrency.py
+```
+
+Review the test results and MongoDB explain output before submission.
 
 ## Notes
 
