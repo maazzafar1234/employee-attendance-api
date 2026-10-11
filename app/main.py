@@ -998,32 +998,15 @@ def department_summary(
             if item["headcount"] > 0
         ],
     }
-@app.get("/analytics/departments/{department}/trend")
-def department_trend(
-    department: str,
-    from_date: date = Query(..., alias="from"),
-    to_date: date = Query(..., alias="to"),
+def build_department_trend_pipeline(
+    department: str, from_date: date, to_date: date
 ):
-    if to_date < from_date:
-        raise HTTPException(
-            status_code=422,
-            detail="'to' must be on or after 'from'",
-        )
-    if (to_date - from_date).days > 91:
-        raise HTTPException(
-            status_code=422,
-            detail="Date range cannot exceed 92 days",
-        )
-    if db.employees.count_documents({"department": department}) == 0:
-        raise HTTPException(status_code=404, detail="Department not found")
+    """Build the complete aggregation pipeline used by trend and explain."""
     start_str = from_date.isoformat()
     end_str = to_date.isoformat()
-    # $densify requires BSON dates, not YYYY-MM-DD strings.
     start_dt = datetime.combine(from_date, time.min, tzinfo=UTC)
     end_exclusive_dt = datetime.combine(
-        to_date + timedelta(days=1),
-        time.min,
-        tzinfo=UTC,
+        to_date + timedelta(days=1), time.min, tzinfo=UTC
     )
     pipeline = [
         {
@@ -1246,6 +1229,30 @@ def department_trend(
         },
         {"$sort": {"date": 1}},
     ]
+    return pipeline
+
+
+@app.get("/analytics/departments/{department}/trend")
+def department_trend(
+    department: str,
+    from_date: date = Query(..., alias="from"),
+    to_date: date = Query(..., alias="to"),
+):
+    if to_date < from_date:
+        raise HTTPException(
+            status_code=422,
+            detail="'to' must be on or after 'from'",
+        )
+    if (to_date - from_date).days > 91:
+        raise HTTPException(
+            status_code=422,
+            detail="Date range cannot exceed 92 days",
+        )
+    if db.employees.count_documents({"department": department}) == 0:
+        raise HTTPException(status_code=404, detail="Department not found")
+    start_str = from_date.isoformat()
+    end_str = to_date.isoformat()
+    pipeline = build_department_trend_pipeline(department, from_date, to_date)
     try:
         items = list(db.employees.aggregate(pipeline))
     except PyMongoError:
@@ -1495,44 +1502,11 @@ def explain_endpoint(
             raise HTTPException(422, "'to' must be on or after 'from'")
         if (to_date - from_date).days > 91:
             raise HTTPException(422, "Date range cannot exceed 92 days")
-        pipeline = [
-            {
-                "$match": {
-                    "department": department,
-                    "joined_on": {"$lte": to_date.isoformat()},
-                }
-            },
-            {
-                "$lookup": {
-                    "from": "attendance_logs",
-                    "let": {"code": "$emp_code"},
-                    "pipeline": [
-                        {
-                            "$match": {
-                                "$expr": {
-                                    "$and": [
-                                        {"$eq": ["$emp_code", "$$code"]},
-                                        {
-                                            "$gte": [
-                                                "$date",
-                                                from_date.isoformat(),
-                                            ]
-                                        },
-                                        {
-                                            "$lte": [
-                                                "$date",
-                                                to_date.isoformat(),
-                                            ]
-                                        },
-                                    ]
-                                }
-                            }
-                        }
-                    ],
-                    "as": "logs",
-                }
-            },
-        ]
+        if db.employees.count_documents({"department": department}) == 0:
+            raise HTTPException(404, "Department not found")
+        pipeline = build_department_trend_pipeline(
+            department, from_date, to_date
+        )
         command = {
             "aggregate": "employees",
             "pipeline": pipeline,
