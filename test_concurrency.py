@@ -6,7 +6,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 BASE_URL = "http://127.0.0.1:8000"
-EMP_CODE = "CONCURRENCY_TEST"
+EMP_CODE = "CONCURRENCY_TEST_03"
 
 
 def request(method, path, body=None):
@@ -88,14 +88,8 @@ def main():
     print(status, body)
 
     if status == 409:
-        print(
-            f"\nEmployee {EMP_CODE} already exists. "
-            "Use a fresh EMP_CODE in this script or remove the old "
-            "test employee and its attendance records before retrying."
-        )
-        return
-
-    if status != 201:
+        print(f"Employee {EMP_CODE} already exists; reusing it.")
+    elif status != 201:
         print("Could not create test employee. Stopping.")
         return
 

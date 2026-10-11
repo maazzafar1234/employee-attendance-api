@@ -1,13 +1,12 @@
 
 import json
-import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 BASE_URL = "http://127.0.0.1:8000"
 EMP_CODE = "CONCURRENCY_TEST"
-ATTENDANCE_DATE = time.strftime("%Y-%m-%d", time.gmtime())
+ATTENDANCE_DATE = "2026-10-11"
 
 
 def request(method, path, body=None):
@@ -32,83 +31,110 @@ def request(method, path, body=None):
         return exc.code, result
 
 
-def main():
-    # Read the test employee's current attendance record.
-    status, page = request(
-        "GET",
-        f"/attendance?emp_code={EMP_CODE}&date_from={ATTENDANCE_DATE}"
-        f"&date_to={ATTENDANCE_DATE}&page=1&page_size=100",
+def get_record():
+    path = (
+        f"/attendance?emp_code={EMP_CODE}"
+        f"&date_from={ATTENDANCE_DATE}"
+        f"&date_to={ATTENDANCE_DATE}&page=1&page_size=100"
     )
+    code, page = request("GET", path)
 
-    if status != 200:
-        print("Could not read attendance:", status, page)
+    if code != 200 or not page.get("items"):
+        raise RuntimeError(
+            f"Could not find attendance record: HTTP {code}, {page}"
+        )
+
+    return page["items"][0]
+
+
+def main():
+    endpoint = f"/attendance/{EMP_CODE}/{ATTENDANCE_DATE}"
+
+    try:
+        record = get_record()
+    except RuntimeError as exc:
+        print("FAIL:", exc)
         return
 
-    items = page.get("items", [])
-    if not items:
-        print("No attendance record found for today's date.")
-        print("Run test_concurrency.py successfully first.")
+    # Prepare a known status before measuring the test history.
+    if record.get("status") != "PRESENT":
+        code, body = request(
+            "PATCH",
+            endpoint,
+            {
+                "status": "PRESENT",
+                "reason": "Prepare regularization concurrency test",
+                "regularized_by": "Maaz",
+            },
+        )
+        if code != 200:
+            print("FAIL: Could not prepare record:", code, body)
+            return
+
+    record = get_record()
+    initial_history = record.get("history", [])
+    before_count = len(initial_history)
+    original_punch_in = record.get("punch_in")
+
+    if original_punch_in is None:
+        print("FAIL: Attendance record has no punch-in timestamp.")
         return
 
-    record = items[0]
-    history_before = len(record.get("history", []))
-    print("History entries before:", history_before)
+    print("History entries before concurrent requests:", before_count)
 
-    # Use two different reasons so we can verify that both entries survive.
-    requests = [
-       
-{
-    "status": "WFH",
-    "reason": "Concurrency audit test A",
-    "regularized_by": "Maaz",
-},
-{
-    "status": "ON_DUTY",
-    "reason": "Concurrency audit test B",
-    "regularized_by": "Maaz",
-},
-
-    ]
-
-    path = f"/attendance/{EMP_CODE}/{ATTENDANCE_DATE}"
+    # These requests update different fields.
+    payload_a = {
+        "status": "WFH",
+        "reason": "Concurrency audit test A",
+        "regularized_by": "Maaz",
+    }
+    payload_b = {
+        "punch_in": original_punch_in + 1000,
+        "reason": "Concurrency audit test B",
+        "regularized_by": "Maaz",
+    }
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
-            pool.submit(request, "PATCH", path, body)
-            for body in requests
+            pool.submit(request, "PATCH", endpoint, payload_a),
+            pool.submit(request, "PATCH", endpoint, payload_b),
         ]
         results = [future.result() for future in futures]
 
-    print("\nConcurrent PATCH responses:")
-    for status_code, body in results:
-        print(status_code, body)
+    print("\nConcurrent PATCH response codes:")
+    for code, body in results:
+        print(code, body if code != 200 else {
+            "emp_code": body.get("emp_code"),
+            "status": body.get("status"),
+            "punch_in": body.get("punch_in"),
+        })
 
-    # Read the record again and inspect the persisted history.
-    status, page = request(
-        "GET",
-        f"/attendance?emp_code={EMP_CODE}&date_from={ATTENDANCE_DATE}"
-        f"&date_to={ATTENDANCE_DATE}&page=1&page_size=100",
-    )
-
-    if status != 200 or not page.get("items"):
-        print("Could not verify the final record:", status, page)
+    try:
+        final_record = get_record()
+    except RuntimeError as exc:
+        print("FAIL:", exc)
         return
 
-    record_after = page["items"][0]
-    history_after = record_after.get("history", [])
-    print("\nHistory entries after:", len(history_after))
+    final_history = final_record.get("history", [])
+    new_history = final_history[before_count:]
+    new_reasons = [item.get("reason") for item in new_history]
 
-    reasons = {entry.get("reason") for entry in history_after}
-    both_preserved = (
-        "Concurrency audit test A" in reasons
-        and "Concurrency audit test B" in reasons
-    )
+    print("\nHistory entries after:", len(final_history))
+    print("New audit reasons:", new_reasons)
 
-    if both_preserved:
-        print("PASS: Both concurrent audit entries were preserved.")
+    if len(final_history) < before_count:
+        print("FAIL: Existing audit history was lost.")
+        return
+
+    expected_reasons = {
+        "Concurrency audit test A",
+        "Concurrency audit test B",
+    }
+    if expected_reasons.issubset(set(new_reasons)):
+        print("PASS: Both concurrent updates have audit entries.")
     else:
-        print("FAIL: One or both concurrent audit entries are missing.")
-        print("Final history:", json.dumps(history_after, indent=2))
+        print("FAIL: Both audit entries were not preserved.")
+        print("Check the response codes and API logs.")
 
 
 if __name__ == "__main__":
