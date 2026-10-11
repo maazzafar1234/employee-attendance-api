@@ -6,7 +6,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 BASE_URL = "http://127.0.0.1:8000"
-EMP_CODE = "CONCURRENCY_TEST_03"
+EMP_CODE = "CONCURRENCY_TEST_04"
 
 
 def request(method, path, body=None):
