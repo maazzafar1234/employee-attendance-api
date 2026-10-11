@@ -1199,32 +1199,26 @@ def department_trend(
             }
         },
         {
-            "$set": {
-                "attendance_rate": {
-                    "$cond": [
-                        {
-                            "$and": [
-                                "$is_working_day",
-                                {"$gt": ["$headcount", 0]},
-                            ]
-                        },
-                        {
-    "$round": [
-        {"$divide": ["$present_count", "$headcount"]},
-        4,
-    ]
-},
-                        {
-                            "$cond": [
-                                "$is_working_day",
-                                0,
-                                None,
-                            ]
-                        },
+    "$set": {
+        "attendance_rate": {
+            "$cond": [
+                {
+                    "$and": [
+                        "$is_working_day",
+                        {"$gt": ["$headcount", 0]},
                     ]
-                }
-            }
-        },
+                },
+                {
+                    "$round": [
+                        {"$divide": ["$present_count", "$headcount"]},
+                        4,
+                    ]
+                },
+                None,
+            ]
+        }
+    }
+},
         {
             "$setWindowFields": {
                 "sortBy": {"date": 1},
