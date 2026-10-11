@@ -1,4 +1,5 @@
-
+import json
+from bson import json_util
 import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
@@ -34,8 +35,8 @@ async def lifespan(app: FastAPI):
     try:
         client.admin.command("ping")
         employees.create_index(
-            [("emp_code", ASCENDING)], unique=True,
-            name="uq_employees_emp_code",
+               [("department", ASCENDING), ("joined_on", ASCENDING)],
+             name="ix_employees_department_joined",
         )
         attendance_logs.create_index(
             [("emp_code", ASCENDING), ("date", ASCENDING)],
@@ -287,14 +288,18 @@ def punch_in(body: PunchInIn):
     return doc
 
 
+
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
     employee = require_employee(body.emp_code)
+
     punched_at = (
         datetime.now(UTC).replace(microsecond=0)
         if body.punched_at is None
         else epoch_ms_to_datetime(body.punched_at)
     )
+
+    # Find the latest open attendance record.
     record = attendance_logs.find_one(
         {
             "emp_code": body.emp_code,
@@ -303,122 +308,310 @@ def punch_out(body: PunchOutIn):
         },
         sort=[("punch_in", DESCENDING)],
     )
+
     if record is None:
-        raise HTTPException(404, "No open attendance record found")
+        # Check whether the employee has any attendance record.
+        existing_record = attendance_logs.find_one(
+            {"emp_code": body.emp_code},
+            sort=[("punch_in", DESCENDING)],
+        )
+
+        if existing_record is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No attendance record found",
+            )
+
+        # The latest record is already closed.
+        if existing_record.get("punch_out") is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Attendance record already punched out",
+            )
+
+        raise HTTPException(
+            status_code=404,
+            detail="No open attendance record found",
+        )
+
     punch_in_time = record["punch_in"]
+
     if punched_at <= punch_in_time:
-        raise HTTPException(422, "Punch-out must be after punch-in")
+        raise HTTPException(
+            status_code=422,
+            detail="Punch-out must be after punch-in",
+        )
+
     if (punched_at - punch_in_time).total_seconds() > 86400:
-        raise HTTPException(422, "Punch duration cannot exceed 24 hours")
+        raise HTTPException(
+            status_code=422,
+            detail="Punch duration cannot exceed 24 hours",
+        )
 
     hours = compute_work_hours(punch_in_time, punched_at)
+
     result = attendance_logs.update_one(
-        {"_id": record["_id"], "punch_out": None},
-        {"$set": {
-            "punch_out": punched_at,
-            "work_hours": hours,
-            "half_day": hours < 4.50,
-            "overtime_minutes": compute_overtime(
-                punched_at, employee["shift_end"], record["date"],
-                employee["shift_start"],
-            ),
-        }},
+        {
+            "_id": record["_id"],
+            "punch_out": None,
+        },
+        {
+            "$set": {
+                "punch_out": punched_at,
+                "work_hours": hours,
+                "half_day": hours < 4.50,
+                "overtime_minutes": compute_overtime(
+                    punched_at,
+                    employee["shift_end"],
+                    record["date"],
+                    employee["shift_start"],
+                ),
+            }
+        },
     )
+
     if result.modified_count != 1:
-        raise HTTPException(409, "Attendance record already punched out")
-    return attendance_logs.find_one({"_id": record["_id"]}, {"_id": 0})
+        raise HTTPException(
+            status_code=409,
+            detail="Attendance record already punched out",
+        )
+
+    return attendance_logs.find_one(
+        {"_id": record["_id"]},
+        {"_id": 0},
+    )
+
+
+
 
 
 @app.patch("/attendance/{emp_code}/{attendance_date}")
 def regularize_attendance(
-    emp_code: str, attendance_date: str, body: AttendancePatchIn
+    emp_code: str,
+    attendance_date: str,
+    body: AttendancePatchIn,
 ):
     parse_date(attendance_date)
     employee = require_employee(emp_code)
+
     record = attendance_logs.find_one({
-        "emp_code": emp_code, "date": attendance_date
+        "emp_code": emp_code,
+        "date": attendance_date,
     })
+
     if record is None:
-        raise HTTPException(404, "Attendance record not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Attendance record not found",
+        )
 
     changes = body.model_dump(exclude_unset=True)
     reason = changes.pop("reason")
     regularized_by = changes.pop("regularized_by")
-    if not any(k in changes for k in ("status", "punch_in", "punch_out")):
-        raise HTTPException(422, "Supply at least one attendance field")
+
+    if not any(
+        key in changes for key in ("status", "punch_in", "punch_out")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Supply at least one attendance field",
+        )
 
     new_status = changes.get("status", record["status"])
+
+    if new_status is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Status cannot be null",
+        )
+
     if new_status in {"ABSENT", "LEAVE"}:
-        if changes.get("punch_in") is not None or changes.get("punch_out") is not None:
-            raise HTTPException(422, "ABSENT and LEAVE cannot have punch times")
+        if (
+            changes.get("punch_in") is not None
+            or changes.get("punch_out") is not None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="ABSENT and LEAVE cannot have punch times",
+            )
+
         changes.update({
-            "punch_in": None, "punch_out": None, "work_hours": None,
-            "late_minutes": 0, "overtime_minutes": 0, "half_day": False,
+            "status": new_status,
+            "punch_in": None,
+            "punch_out": None,
+            "work_hours": None,
+            "late_minutes": 0,
+            "overtime_minutes": 0,
+            "half_day": False,
         })
+
     else:
-        punch_in_raw = changes.get("punch_in", record.get("punch_in"))
-        punch_out_raw = changes.get("punch_out", record.get("punch_out"))
+        punch_in_raw = changes.get(
+            "punch_in", record.get("punch_in")
+        )
+        punch_out_raw = changes.get(
+            "punch_out", record.get("punch_out")
+        )
+
         if punch_in_raw is None:
-            raise HTTPException(422, "Presence status requires punch_in")
+            raise HTTPException(
+                status_code=422,
+                detail="Presence status requires punch_in",
+            )
 
         punch_in_time = (
             epoch_ms_to_datetime(punch_in_raw)
-            if "punch_in" in changes else punch_in_raw
+            if "punch_in" in changes
+            else punch_in_raw
         )
+
         punch_out_time = (
             epoch_ms_to_datetime(punch_out_raw)
             if "punch_out" in changes and punch_out_raw is not None
             else punch_out_raw
         )
-        if attendance_date_for_punch(
-            punch_in_time, employee["shift_start"], employee["shift_end"]
-        ) != attendance_date:
-            raise HTTPException(422, "Punch-in does not match attendance date")
 
-        changes["punch_in"] = punch_in_time
-        changes["late_minutes"] = compute_late_minutes(
-            punch_in_time, employee["shift_start"], attendance_date
-        )
-        if punch_out_time is None:
-            changes.update({
-                "punch_out": None, "work_hours": None,
-                "overtime_minutes": 0, "half_day": False,
-            })
-        else:
+        if attendance_date_for_punch(
+            punch_in_time,
+            employee["shift_start"],
+            employee["shift_end"],
+        ) != attendance_date:
+            raise HTTPException(
+                status_code=422,
+                detail="Punch-in does not match attendance date",
+            )
+
+        if punch_out_time is not None:
             if punch_out_time <= punch_in_time:
-                raise HTTPException(422, "Punch-out must be after punch-in")
-            if (punch_out_time - punch_in_time).total_seconds() > 86400:
-                raise HTTPException(422, "Punch duration cannot exceed 24 hours")
-            hours = compute_work_hours(punch_in_time, punch_out_time)
+                raise HTTPException(
+                    status_code=422,
+                    detail="Punch-out must be after punch-in",
+                )
+
+            if (
+                punch_out_time - punch_in_time
+            ).total_seconds() > 86400:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Punch duration cannot exceed 24 hours",
+                )
+
+            if attendance_date_for_punch(
+                punch_out_time,
+                employee["shift_start"],
+                employee["shift_end"],
+            ) != attendance_date:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Punch-out does not match attendance date",
+                )
+
+            hours = compute_work_hours(
+                punch_in_time, punch_out_time
+            )
+
             changes.update({
                 "punch_out": punch_out_time,
                 "work_hours": hours,
                 "half_day": hours < 4.50,
                 "overtime_minutes": compute_overtime(
-                    punch_out_time, employee["shift_end"], attendance_date,
+                    punch_out_time,
+                    employee["shift_end"],
+                    attendance_date,
                     employee["shift_start"],
                 ),
             })
+        else:
+            changes.update({
+                "punch_out": None,
+                "work_hours": None,
+                "overtime_minutes": 0,
+                "half_day": False,
+            })
 
-    actual = {k: v for k, v in changes.items() if record.get(k) != v}
+        changes["punch_in"] = punch_in_time
+        changes["late_minutes"] = compute_late_minutes(
+            punch_in_time,
+            employee["shift_start"],
+            attendance_date,
+        )
+
+    actual = {
+        key: value
+        for key, value in changes.items()
+        if record.get(key) != value
+    }
+
     if not actual:
-        raise HTTPException(422, "No changes to apply")
+        raise HTTPException(
+            status_code=422,
+            detail="No changes to apply",
+        )
 
+    # Required audit-history format.
     history_item = {
-        "regularized_by": regularized_by,
+        "at": datetime.now(UTC).replace(microsecond=0),
+        "by": regularized_by,
         "reason": reason,
-        "changed_at": datetime.now(UTC).replace(microsecond=0),
         "changes": {
-            k: {"old": record.get(k), "new": v} for k, v in actual.items()
+            key: {
+                "from": record.get(key),
+                "to": value,
+            }
+            for key, value in actual.items()
         },
     }
+
+    # Compare the old values and append history atomically.
+    # $push preserves existing history entries.
     result = attendance_logs.update_one(
-        {"_id": record["_id"], **{k: record.get(k) for k in actual}},
-        {"$set": actual, "$push": {"history": history_item}},
+        {
+            "_id": record["_id"],
+            **{
+                key: record.get(key)
+                for key in actual
+            },
+        },
+        {
+            "$set": actual,
+            "$push": {"history": history_item},
+        },
     )
+
     if result.modified_count != 1:
-        raise HTTPException(409, "Attendance record changed concurrently; retry")
-    return attendance_logs.find_one({"_id": record["_id"]}, {"_id": 0})
+        raise HTTPException(
+            status_code=409,
+            detail="Attendance record changed concurrently; retry",
+        )
+
+    updated = attendance_logs.find_one(
+        {"_id": record["_id"]},
+        {"_id": 0},
+    )
+
+    # Convert every datetime in the response to epoch milliseconds.
+    def convert_datetimes(value):
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            return int(value.timestamp() * 1000)
+
+        if isinstance(value, dict):
+            return {
+                key: convert_datetimes(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, list):
+            return [convert_datetimes(item) for item in value]
+
+        return value
+
+    return convert_datetimes(updated)
+
+
+
+
 
 
 @app.get("/attendance")
@@ -431,32 +624,86 @@ def list_attendance(
     page_size: int = Query(20, ge=1, le=100),
 ):
     query = {}
+
     if emp_code is not None:
         query["emp_code"] = emp_code
+
     if status is not None:
-        if status not in {"PRESENT", "WFH", "ON_DUTY", "ABSENT", "LEAVE"}:
+        if status not in {
+            "PRESENT", "WFH", "ON_DUTY", "ABSENT", "LEAVE"
+        }:
             raise HTTPException(422, "Invalid attendance status")
         query["status"] = status
+
     date_filter = {}
+
     if date_from is not None:
         parse_date(date_from)
         date_filter["$gte"] = date_from
+
     if date_to is not None:
         parse_date(date_to)
         date_filter["$lte"] = date_to
+
     if date_from and date_to and date_from > date_to:
-        raise HTTPException(422, "date_from must be on or before date_to")
+        raise HTTPException(
+            422,
+            "date_from must be on or before date_to",
+        )
+
     if date_filter:
         query["date"] = date_filter
 
     total = attendance_logs.count_documents(query)
+
     items = list(
         attendance_logs.find(query, {"_id": 0})
         .sort([("date", DESCENDING), ("emp_code", ASCENDING)])
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    def convert_datetimes(value):
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            return int(value.timestamp() * 1000)
+
+        if isinstance(value, dict):
+            # Normalize legacy history field names in the response.
+            if "regularized_by" in value:
+                value["by"] = value.pop("regularized_by")
+
+            if "changed_at" in value:
+                value["at"] = value.pop("changed_at")
+
+            if "old" in value:
+                value["from"] = value.pop("old")
+
+            if "new" in value:
+                value["to"] = value.pop("new")
+
+            return {
+                key: convert_datetimes(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, list):
+            return [convert_datetimes(item) for item in value]
+
+        return value
+
+    items = convert_datetimes(items)
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+
 
 
 
@@ -612,7 +859,7 @@ def late_leaderboard(
     ])
 
     try:
-        items = list(db.attendance_logs.aggregate(pipeline))    
+        items = list(db.attendance_logs.aggregate(pipeline))
     except PyMongoError:
         raise HTTPException(503, "Database operation failed")
 
@@ -889,6 +1136,7 @@ def department_trend(
                             "status": 1,
                             "half_day": 1,
                             "late_minutes": 1,
+                            "_seed": {"$literal": False},
                         }
                     },
                 ],
@@ -904,23 +1152,25 @@ def department_trend(
                         "$logs",
                         [
                             {
-                                "date": start_dt,
-                                "status": None,
-                                "half_day": False,
-                                "late_minutes": 0,
-                            }
+    "date": start_dt,
+    "status": None,
+    "half_day": False,
+    "late_minutes": 0,
+    "_seed": True,
+}
                         ],
                     ]
                 },
             }
         },
         {"$unwind": "$logs"},
-        {
-            "$group": {
-                "_id": {
-                    "date": "$logs.date",
-                    "emp_code": "$emp_code",
-                },
+{"$sort": {"logs._seed": 1}},
+{
+    "$group": {
+        "_id": {
+            "date": "$logs.date",
+            "emp_code": "$emp_code",
+        },
                 "joined_on": {"$first": "$joined_on"},
                 "status": {"$first": "$logs.status"},
                 "half_day": {"$first": "$logs.half_day"},
@@ -1034,21 +1284,11 @@ def department_trend(
                             ]
                         },
                         {
-                            "$round": [
-                                {
-                                    "$multiply": [
-                                        {
-                                            "$divide": [
-                                                "$present_count",
-                                                "$headcount",
-                                            ]
-                                        },
-                                        100,
-                                    ]
-                                },
-                                4,
-                            ]
-                        },
+    "$round": [
+        {"$divide": ["$present_count", "$headcount"]},
+        4,
+    ]
+},
                         {
                             "$cond": [
                                 "$is_working_day",
@@ -1102,3 +1342,339 @@ def department_trend(
         "to": end_str,
         "items": items,
     }
+
+
+
+@app.get("/admin/explain/{endpoint}")
+def explain_endpoint(
+    endpoint: str,
+    emp_code: str | None = None,
+    department: str | None = None,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    from_date: date | None = Query(None, alias="from"),
+    to_date: date | None = Query(None, alias="to"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    limit: int = Query(10, ge=1, le=100),
+):
+    allowed_endpoints = {
+        "attendance_list",
+        "employee_monthly",
+        "department_summary",
+        "late_leaderboard",
+        "department_trend",
+    }
+
+    if endpoint not in allowed_endpoints:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Unsupported endpoint",
+                "allowed_endpoints": sorted(allowed_endpoints),
+            },
+        )
+
+
+
+
+    def run_explain(collection_name: str, command: dict) -> dict:
+        try:
+            result = db.command(
+                "explain",
+                command,
+                verbosity="executionStats",
+            )
+
+            # Convert BSON-specific values into JSON-safe values.
+            extended_json = json_util.dumps(result)
+            plain_result = json.loads(extended_json)
+
+            return plain_result
+
+        except PyMongoError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not explain MongoDB query: {str(exc)}",
+            )
+
+
+
+
+    if endpoint == "attendance_list":
+        query = {}
+
+        if emp_code is not None:
+            query["emp_code"] = emp_code
+
+        if department is not None:
+            matching_employees = employees.find(
+                {"department": department},
+                {"emp_code": 1, "_id": 0},
+            )
+            codes = [item["emp_code"] for item in matching_employees]
+            query["emp_code"] = {"$in": codes}
+
+        if date_from is not None:
+            query.setdefault("date", {})["$gte"] = date_from.isoformat()
+
+        if date_to is not None:
+            query.setdefault("date", {})["$lte"] = date_to.isoformat()
+
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(
+                status_code=422,
+                detail="date_from must be on or before date_to",
+            )
+
+        command = {
+            "find": "attendance_logs",
+            "filter": query,
+            "sort": {"date": -1, "emp_code": 1},
+            "skip": (page - 1) * page_size,
+            "limit": page_size,
+        }
+
+        return {
+            "endpoint": endpoint,
+            "explain": run_explain("attendance_logs", command),
+        }
+
+    if endpoint == "employee_monthly":
+        if not emp_code:
+            raise HTTPException(422, "emp_code is required")
+
+        if not month:
+            raise HTTPException(422, "month is required in YYYY-MM format")
+
+        if not __import__("re").fullmatch(
+            r"\d{4}-(0[1-9]|1[0-2])", month
+        ):
+            raise HTTPException(422, "month must use YYYY-MM format")
+
+        year, month_number = map(int, month.split("-"))
+        period_start = date(year, month_number, 1)
+
+        if month_number == 12:
+            period_end = date(year + 1, 1, 1)
+        else:
+            period_end = date(year, month_number + 1, 1)
+
+        require_employee(emp_code)
+
+        command = {
+            "find": "attendance_logs",
+            "filter": {
+                "emp_code": emp_code,
+                "date": {
+                    "$gte": period_start.isoformat(),
+                    "$lt": period_end.isoformat(),
+                },
+            },
+        }
+
+        return {
+            "endpoint": endpoint,
+            "explain": run_explain("attendance_logs", command),
+        }
+
+    if endpoint == "department_summary":
+        if not month:
+            raise HTTPException(422, "month is required in YYYY-MM format")
+
+        if not __import__("re").fullmatch(
+            r"\d{4}-(0[1-9]|1[0-2])", month
+        ):
+            raise HTTPException(422, "month must use YYYY-MM format")
+
+        year, month_number = map(int, month.split("-"))
+        period_start = date(year, month_number, 1)
+
+        if month_number == 12:
+            period_end = date(year + 1, 1, 1)
+        else:
+            period_end = date(year, month_number + 1, 1)
+
+        pipeline = [
+            {"$match": {"joined_on": {"$lt": period_end.isoformat()}}},
+            {
+                "$lookup": {
+                    "from": "attendance_logs",
+                    "let": {"code": "$emp_code"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$emp_code", "$$code"]},
+                                        {
+                                            "$gte": [
+                                                "$date",
+                                                period_start.isoformat(),
+                                            ]
+                                        },
+                                        {
+                                            "$lt": [
+                                                "$date",
+                                                period_end.isoformat(),
+                                            ]
+                                        },
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    "as": "logs",
+                }
+            },
+        ]
+
+        command = {
+            "aggregate": "employees",
+            "pipeline": pipeline,
+            "cursor": {},
+        }
+
+        return {
+            "endpoint": endpoint,
+            "explain": run_explain("employees", command),
+        }
+
+    if endpoint == "late_leaderboard":
+        if not month:
+            raise HTTPException(422, "month is required in YYYY-MM format")
+
+        if not __import__("re").fullmatch(
+            r"\d{4}-(0[1-9]|1[0-2])", month
+        ):
+            raise HTTPException(422, "month must use YYYY-MM format")
+
+        year, month_number = map(int, month.split("-"))
+        period_start = date(year, month_number, 1)
+
+        if month_number == 12:
+            period_end = date(year + 1, 1, 1)
+        else:
+            period_end = date(year, month_number + 1, 1)
+
+        pipeline = [
+            {
+                "$match": {
+                    "date": {
+                        "$gte": period_start.isoformat(),
+                        "$lt": period_end.isoformat(),
+                    },
+                    "late_minutes": {"$gt": 0},
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$emp_code",
+                    "total_late_minutes": {"$sum": "$late_minutes"},
+                }
+            },
+            {"$sort": {"total_late_minutes": -1, "_id": 1}},
+            {
+                "$lookup": {
+                    "from": "employees",
+                    "localField": "_id",
+                    "foreignField": "emp_code",
+                    "as": "employee",
+                }
+            },
+            {"$unwind": "$employee"},
+        ]
+
+        if department is not None:
+            pipeline.append(
+                {"$match": {"employee.department": department}}
+            )
+
+        pipeline.extend([
+            {
+                "$setWindowFields": {
+                    "sortBy": {"total_late_minutes": -1},
+                    "output": {"rank": {"$rank": {}}},
+                }
+            },
+            {"$match": {"rank": {"$lte": limit}}},
+            {"$sort": {"total_late_minutes": -1, "_id": 1}},
+        ])
+
+        command = {
+            "aggregate": "attendance_logs",
+            "pipeline": pipeline,
+            "cursor": {},
+        }
+
+        return {
+            "endpoint": endpoint,
+            "explain": run_explain("attendance_logs", command),
+        }
+
+    if endpoint == "department_trend":
+        if not department:
+            raise HTTPException(422, "department is required")
+
+        if from_date is None or to_date is None:
+            raise HTTPException(
+                422,
+                "Both 'from' and 'to' dates are required",
+            )
+
+        if to_date < from_date:
+            raise HTTPException(422, "'to' must be on or after 'from'")
+
+        if (to_date - from_date).days > 91:
+            raise HTTPException(422, "Date range cannot exceed 92 days")
+
+        pipeline = [
+            {
+                "$match": {
+                    "department": department,
+                    "joined_on": {"$lte": to_date.isoformat()},
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "attendance_logs",
+                    "let": {"code": "$emp_code"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$emp_code", "$$code"]},
+                                        {
+                                            "$gte": [
+                                                "$date",
+                                                from_date.isoformat(),
+                                            ]
+                                        },
+                                        {
+                                            "$lte": [
+                                                "$date",
+                                                to_date.isoformat(),
+                                            ]
+                                        },
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    "as": "logs",
+                }
+            },
+        ]
+
+        command = {
+            "aggregate": "employees",
+            "pipeline": pipeline,
+            "cursor": {},
+        }
+
+        return {
+            "endpoint": endpoint,
+            "explain": run_explain("employees", command),
+        }
