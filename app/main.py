@@ -344,7 +344,6 @@ def punch_out(body: PunchOutIn):
         {"_id": record["_id"]},
         {"_id": 0},
     )
-@app.patch("/attendance/{emp_code}/{attendance_date}")
 def _regularize_attendance_once(
     emp_code: str,
     attendance_date: str,
@@ -538,7 +537,7 @@ def _regularize_attendance_once(
             return [convert_datetimes(item) for item in value]
         return value
     return convert_datetimes(updated)
-@app.patch("/attendance/{emp_code}/{attendance_date}")
+
 def regularize_attendance(
     emp_code: str,
     attendance_date: str,
@@ -1549,4 +1548,3 @@ def explain_endpoint(
             "endpoint": endpoint,
             "explain": run_explain("employees", command),
         }
-        
