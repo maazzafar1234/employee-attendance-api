@@ -416,15 +416,6 @@ def _regularize_attendance_once(
             if "punch_out" in changes and punch_out_raw is not None
             else punch_out_raw
         )
-        if attendance_date_for_punch(
-            punch_in_time,
-            employee["shift_start"],
-            employee["shift_end"],
-        ) != attendance_date:
-            raise HTTPException(
-                status_code=422,
-                detail="Punch-in does not match attendance date",
-            )
         if punch_out_time is not None:
             if punch_out_time <= punch_in_time:
                 raise HTTPException(
