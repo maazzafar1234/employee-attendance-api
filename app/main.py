@@ -429,15 +429,7 @@ def _regularize_attendance_once(
                     status_code=422,
                     detail="Punch duration cannot exceed 24 hours",
                 )
-            if attendance_date_for_punch(
-                punch_out_time,
-                employee["shift_start"],
-                employee["shift_end"],
-            ) != attendance_date:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Punch-out does not match attendance date",
-                )
+
             hours = compute_work_hours(
                 punch_in_time, punch_out_time
             )
