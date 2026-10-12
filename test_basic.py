@@ -1,4 +1,3 @@
-
 from datetime import date
 
 from fastapi.testclient import TestClient
@@ -8,26 +7,11 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_date_range_limit_is_92_days():
-    start = date(2026, 1, 1)
-    end = date(2026, 4, 3)
-
-    assert (end - start).days == 92
-
-
-def test_date_range_over_92_days_is_rejected():
-    start = date(2026, 1, 1)
-    end = date(2026, 4, 4)
-
-    assert (end - start).days > 92
-
-
 def test_health_endpoint_returns_ok():
     response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
 
 def test_invalid_month_is_rejected():
     response = client.get(
@@ -50,6 +34,30 @@ def test_invalid_trend_date_is_rejected():
         params={
             "from": "not-a-date",
             "to": "2026-10-12",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_reversed_trend_date_range_is_rejected():
+    response = client.get(
+        "/analytics/departments/Engineering/trend",
+        params={
+            "from": "2026-10-12",
+            "to": "2026-10-11",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_trend_range_over_92_days_is_rejected():
+    response = client.get(
+        "/analytics/departments/Engineering/trend",
+        params={
+            "from": "2026-01-01",
+            "to": "2026-04-04",
         },
     )
 
