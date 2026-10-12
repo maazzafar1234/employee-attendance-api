@@ -1353,6 +1353,7 @@ def explain_endpoint(
             "endpoint": endpoint,
             "explain": run_explain("attendance_logs", command),
         }
+
     if endpoint == "employee_monthly":
         if not emp_code:
             raise HTTPException(422, "emp_code is required")
@@ -1362,27 +1363,108 @@ def explain_endpoint(
             r"\d{4}-(0[1-9]|1[0-2])", month
         ):
             raise HTTPException(422, "month must use YYYY-MM format")
+
         year, month_number = map(int, month.split("-"))
         period_start = date(year, month_number, 1)
-        if month_number == 12:
-            period_end = date(year + 1, 1, 1)
-        else:
-            period_end = date(year, month_number + 1, 1)
-        require_employee(emp_code)
-        command = {
-            "find": "attendance_logs",
-            "filter": {
-                "emp_code": emp_code,
-                "date": {
-                    "$gte": period_start.isoformat(),
-                    "$lt": period_end.isoformat(),
-                },
+        period_end = (
+            date(year + 1, 1, 1)
+            if month_number == 12
+            else date(year, month_number + 1, 1)
+        )
+
+        employee = require_employee(emp_code)
+        effective_start = max(
+            period_start, parse_date(employee["joined_on"])
+        )
+
+        pipeline = [
+            {
+                "$match": {
+                    "emp_code": emp_code,
+                    "date": {
+                        "$gte": effective_start.isoformat(),
+                        "$lt": period_end.isoformat(),
+                    },
+                }
             },
+            {
+                "$set": {
+                    "weekday_number": {
+                        "$dayOfWeek": {
+                            "$dateFromString": {"dateString": "$date"}
+                        }
+                    },
+                    "late_value": {"$ifNull": ["$late_minutes", 0]},
+                    "overtime_value": {
+                        "$ifNull": ["$overtime_minutes", 0]
+                    },
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "present_days": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$and": [
+                                        {
+                                            "$in": [
+                                                "$status",
+                                                ["PRESENT", "WFH", "ON_DUTY"],
+                                            ]
+                                        },
+                                        {"$gte": ["$weekday_number", 2]},
+                                        {"$lte": ["$weekday_number", 6]},
+                                    ]
+                                },
+                                {
+                                    "$cond": [
+                                        {"$eq": ["$half_day", True]},
+                                        0.5,
+                                        1.0,
+                                    ]
+                                },
+                                0,
+                            ]
+                        }
+                    },
+                    "leave_days": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$and": [
+                                        {"$eq": ["$status", "LEAVE"]},
+                                        {"$gte": ["$weekday_number", 2]},
+                                        {"$lte": ["$weekday_number", 6]},
+                                    ]
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                    "late_count": {
+                        "$sum": {
+                            "$cond": [{"$gt": ["$late_value", 0]}, 1, 0]
+                        }
+                    },
+                    "total_late_minutes": {"$sum": "$late_value"},
+                    "total_overtime_minutes": {"$sum": "$overtime_value"},
+                }
+            },
+        ]
+
+        command = {
+            "aggregate": "attendance_logs",
+            "pipeline": pipeline,
+            "cursor": {},
         }
         return {
             "endpoint": endpoint,
             "explain": run_explain("attendance_logs", command),
         }
+
     if endpoint == "department_summary":
         if not month:
             raise HTTPException(422, "month is required in YYYY-MM format")

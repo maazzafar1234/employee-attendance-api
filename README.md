@@ -1,6 +1,6 @@
 # Employee Attendance & Analytics API
 
-A REST API built using **Python, FastAPI, and MongoDB Atlas** to manage employee attendance, punch-in and punch-out records, attendance regularization, and department analytics.
+A REST API built with **Python, FastAPI, and MongoDB Atlas** to manage employee attendance, punch-in and punch-out records, attendance regularization, and department analytics.
 
 ## Features
 
@@ -35,8 +35,11 @@ employee-attendance-api/
 ├── README.md
 ├── REVIEW.md
 ├── DECISIONS.md
+├── test_basic.py
 ├── test_concurrency.py
-└── test_regularization_concurrency.py
+├── test_regularization_concurrency.py
+├── performance_test.py
+└── benchmark_readonly.py
 ```
 
 ## Setup
@@ -56,9 +59,14 @@ python -m pip install -r requirements.txt
 
 ### 3. Configure environment variables
 
-Create a `.env` file in the project root and configure the MongoDB connection string and database name expected by the application.
+Create a `.env` file in the project root with the MongoDB settings expected by the application:
 
-Do not commit database credentials or other secrets to version control.
+```dotenv
+MONGO_URI=your_mongodb_connection_string
+MONGO_DB=your_database_name
+```
+
+Replace the placeholder values with your own configuration. Do not commit database credentials or other secrets to version control.
 
 ### 4. Start the API
 
@@ -68,9 +76,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ### 5. Open the API documentation
 
-Visit:
-
-http://127.0.0.1:8000/docs
+Visit [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 ## API Endpoints
 
@@ -82,38 +88,61 @@ http://127.0.0.1:8000/docs
 | POST   | `/attendance/punch-in`                      | Record punch-in                       |
 | POST   | `/attendance/punch-out`                     | Record punch-out                      |
 | GET    | `/attendance`                               | List attendance records               |
-| PATCH  | `/attendance/{emp_code}/{date}`             | Regularize attendance                 |
+| PATCH  | `/attendance/{emp_code}/{attendance_date}`  | Regularize attendance                 |
 | GET    | `/analytics/employees/{emp_code}/monthly`   | Monthly employee analytics            |
 | GET    | `/analytics/departments/summary`            | Department summary                    |
 | GET    | `/analytics/leaderboard/late`               | Late-arrival leaderboard              |
 | GET    | `/analytics/departments/{department}/trend` | Department attendance trend           |
 | GET    | `/admin/explain/{endpoint}`                 | Inspect MongoDB query execution plans |
 
-Use Swagger UI to review request parameters and schemas for each endpoint.
+Use Swagger UI to review each endpoint's parameters, request schemas, and response formats.
 
 ## Database and Indexing
 
 The application uses MongoDB collections for employees and attendance logs. Unique and compound indexes support employee identification, attendance uniqueness, date filtering, and analytics queries.
 
-The explain endpoints expose MongoDB execution statistics to help inspect index usage and collection scans.
+The explain endpoints expose MongoDB execution statistics to help inspect index usage and collection scans. An index being used by one query does not establish that every analytics pipeline meets the performance target.
 
 ## Error Handling
 
-The API uses appropriate HTTP status codes for successful requests, validation failures, missing resources, and conflicting attendance operations.
+The API uses HTTP status codes for successful requests, validation failures, missing resources, and conflicting attendance operations. Confirm endpoint-specific status codes and edge cases against the assignment requirements before submission.
 
 ## Testing
 
-Run the concurrency tests with the API running and the required MongoDB environment variables configured:
+Install the test dependencies:
 
 ```powershell
-python -m pip install pytest requests
-python -m pytest -v test_concurrency.py test_regularization_concurrency.py
+python -m pip install pytest httpx2
 ```
 
-Review the test results and MongoDB explain output before submission.
+Run the automated tests:
+
+```powershell
+python -m pytest -q
+```
+
+For concurrency tests, start the API in a separate terminal with MongoDB configured, then run:
+
+```powershell
+python .\test_concurrency.py
+python .\test_regularization_concurrency.py
+```
+
+These tests create or modify dedicated test records. Run them against a suitable test database and preserve existing records.
+
+To inspect the indexed benchmark query against the existing performance-test collection, run:
+
+```powershell
+python .\benchmark_readonly.py
+```
+
+The benchmark script performs read-only queries. Its results validate the specific query tested; they do not independently establish the performance of every analytics pipeline at 100,000 records.
+
+`performance_test.py` is intended to populate a dedicated benchmark collection. Review its safeguards and target database before running it. Do not run it against production data.
 
 ## Notes
 
 - Configure your own MongoDB connection string through environment variables.
 - Keep `.env` and `.venv/` out of version control.
-- Verify all assignment-specific business rules and concurrency requirements before submission.
+- Review `DECISIONS.md` for implementation choices and `REVIEW.md` for verification status.
+- Verify all assignment-specific business rules, analytics pipelines, concurrency requirements, and performance targets before final submission.

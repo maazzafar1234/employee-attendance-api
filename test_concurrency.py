@@ -2,17 +2,18 @@
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
 BASE_URL = "http://127.0.0.1:8000"
 EMP_CODE = "CONCURRENCY_TEST_04"
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def request(method, path, body=None):
-    """Send an HTTP request and return its status and response."""
     data = None if body is None else json.dumps(body).encode("utf-8")
-
     req = urllib.request.Request(
         BASE_URL + path,
         data=data,
@@ -24,18 +25,18 @@ def request(method, path, body=None):
         with urllib.request.urlopen(req, timeout=30) as response:
             raw = response.read().decode()
             return response.status, json.loads(raw) if raw else {}
-
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode()
         try:
-            body = json.loads(raw)
+            result = json.loads(raw)
         except json.JSONDecodeError:
-            body = raw
-        return exc.code, body
+            result = raw
+        return exc.code, result
+    except Exception as exc:
+        return 0, {"error": str(exc)}
 
 
 def concurrent_requests(method, path, body, workers=10):
-    """Launch requests together using a thread pool."""
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(request, method, path, body)
@@ -46,26 +47,69 @@ def concurrent_requests(method, path, body, workers=10):
 
 def show_results(title, results, success_code):
     codes = [status for status, _ in results]
+
     print(f"\n{title}")
     print("-" * len(title))
-    print("HTTP status counts:")
     for code in sorted(set(codes)):
-        print(f"  {code}: {codes.count(code)}")
+        print(f"  HTTP {code}: {codes.count(code)}")
 
-    success_count = codes.count(success_code)
-    conflict_count = codes.count(409)
-
-    passed = success_count == 1 and conflict_count == len(codes) - 1
+    passed = (
+        len(results) == 10
+        and codes.count(success_code) == 1
+        and codes.count(409) == 9
+    )
     print("RESULT:", "PASS" if passed else "FAIL")
+
     if not passed:
-        print("Response details:")
         for status, body in results:
             print(status, body)
+
     return passed
 
 
+def choose_unused_date():
+    """Check exact date filters using the real /attendance API."""
+    today = datetime.now(IST).date()
+
+    for offset in range(1, 366):
+        candidate = (today + timedelta(days=offset)).isoformat()
+        query = urllib.parse.urlencode({
+            "emp_code": EMP_CODE,
+            "date_from": candidate,
+            "date_to": candidate,
+            "page": 1,
+            "page_size": 100,
+        })
+
+        status, body = request("GET", f"/attendance?{query}")
+
+        if status != 200:
+            raise RuntimeError(
+                f"Attendance lookup failed for {candidate}: "
+                f"HTTP {status}: {body}"
+            )
+
+        if not isinstance(body, dict) or not isinstance(
+            body.get("items"), list
+        ):
+            raise RuntimeError(
+                f"Unexpected /attendance response for {candidate}: {body}"
+            )
+
+        if body["items"]:
+            continue
+
+        if body.get("total", 0) != 0:
+            raise RuntimeError(
+                f"Could not verify that {candidate} is unused: {body}"
+            )
+
+        return candidate
+
+    raise RuntimeError("No unused date found within the next 365 days.")
+
+
 def main():
-    # Use a dedicated test employee; don't modify EMP001 or EMP002.
     employee = {
         "emp_code": EMP_CODE,
         "name": "Concurrency Test Employee",
@@ -73,46 +117,43 @@ def main():
         "department": "Engineering",
         "shift_start": "09:30",
         "shift_end": "18:30",
-        "joined_on": time.strftime("%Y-%m-%d", time.gmtime()),
+        "joined_on": datetime.now(IST).date().isoformat(),
     }
 
     print("Checking API health...")
     status, body = request("GET", "/health")
     print(status, body)
+
     if status != 200:
         print("API is not healthy. Start Uvicorn and retry.")
         return
 
-    print("\nCreating dedicated test employee...")
+    print("\nChecking test employee...")
     status, body = request("POST", "/employees", employee)
     print(status, body)
 
     if status == 409:
-        print(f"Employee {EMP_CODE} already exists; reusing it.")
+        print(f"Reusing existing test employee: {EMP_CODE}")
     elif status != 201:
         print("Could not create test employee. Stopping.")
         return
 
-    # Punch in 2 minutes ago, in epoch milliseconds.
-    # All 10 concurrent requests use the exact same timestamp.
-    from datetime import datetime, timedelta, timezone
-    from zoneinfo import ZoneInfo
+    try:
+        test_date = choose_unused_date()
+    except RuntimeError as exc:
+        print(f"\nSAFE STOP: {exc}")
+        print("No concurrency requests were sent.")
+        return
 
-    from datetime import timezone, timedelta
+    print("Selected unused attendance date:", test_date)
 
-    IST = timezone(timedelta(hours=5, minutes=30))
-
-    # Use a future IST calendar date so existing test records are untouched.
-    now_ist = datetime.now(IST)
-    test_date = (now_ist.date() + timedelta(days=1)).isoformat()
-
-    # Use a valid timestamp for the chosen date, at 10:00 IST.
     punch_in_dt = datetime.combine(
         datetime.fromisoformat(test_date).date(),
         datetime.strptime("10:00", "%H:%M").time(),
         tzinfo=IST,
     )
     punch_in_ms = int(punch_in_dt.timestamp() * 1000)
+
     punch_in_body = {
         "emp_code": EMP_CODE,
         "punched_at": punch_in_ms,
@@ -127,14 +168,15 @@ def main():
         "PUNCH-IN CONCURRENCY", punch_in_results, 201
     )
 
-    # Allow the winning punch-in to become visible before punch-out.
+    if not punch_in_pass:
+        print("Stopping: punch-in concurrency did not pass.")
+        return
+
     time.sleep(0.5)
 
-    # Ensure punch-out is after punch-in.
-    punch_out_ms = punch_in_ms + 8 * 60 * 60 * 1000
     punch_out_body = {
         "emp_code": EMP_CODE,
-        "punched_at": punch_out_ms,
+        "punched_at": punch_in_ms + 8 * 60 * 60 * 1000,
     }
 
     print("\nSending 10 simultaneous punch-out requests...")
@@ -151,11 +193,6 @@ def main():
 
     if punch_in_pass and punch_out_pass:
         print("Both concurrency checks passed.")
-    else:
-        print(
-            "At least one check failed. Inspect the status codes and "
-            "response details above."
-        )
 
 
 if __name__ == "__main__":
