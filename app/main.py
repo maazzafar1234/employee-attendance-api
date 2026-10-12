@@ -556,6 +556,17 @@ def regularize_attendance(
         status_code=409,
         detail="Attendance record changed concurrently; retry",
     )
+
+
+@app.patch("/attendance/{emp_code}/{attendance_date}")
+def patch_attendance(
+    emp_code: str,
+    attendance_date: str,
+    body: AttendancePatchIn,
+):
+    return regularize_attendance(emp_code, attendance_date, body)
+
+
 @app.get("/attendance")
 def list_attendance(
     emp_code: str | None = None,

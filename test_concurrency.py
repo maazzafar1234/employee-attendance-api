@@ -95,7 +95,24 @@ def main():
 
     # Punch in 2 minutes ago, in epoch milliseconds.
     # All 10 concurrent requests use the exact same timestamp.
-    punch_in_ms = int(time.time() * 1000) - 120_000
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    from datetime import timezone, timedelta
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    # Use a future IST calendar date so existing test records are untouched.
+    now_ist = datetime.now(IST)
+    test_date = (now_ist.date() + timedelta(days=1)).isoformat()
+
+    # Use a valid timestamp for the chosen date, at 10:00 IST.
+    punch_in_dt = datetime.combine(
+        datetime.fromisoformat(test_date).date(),
+        datetime.strptime("10:00", "%H:%M").time(),
+        tzinfo=IST,
+    )
+    punch_in_ms = int(punch_in_dt.timestamp() * 1000)
     punch_in_body = {
         "emp_code": EMP_CODE,
         "punched_at": punch_in_ms,
@@ -114,7 +131,7 @@ def main():
     time.sleep(0.5)
 
     # Ensure punch-out is after punch-in.
-    punch_out_ms = int(time.time() * 1000)
+    punch_out_ms = punch_in_ms + 8 * 60 * 60 * 1000
     punch_out_body = {
         "emp_code": EMP_CODE,
         "punched_at": punch_out_ms,
